@@ -1,0 +1,151 @@
+"""
+Ejemplo de un Agente de IA con Python usando la API de Anthropic (Claude).
+
+Un "agente" es básicamente un modelo de lenguaje que puede:
+1. Recibir una tarea del usuario.
+2. Decidir si necesita usar una herramienta (tool) para resolverla.
+3. Ejecutar esa herramienta en código real (Python).
+4. Devolver el resultado al modelo para que continúe razonando.
+5. Repetir hasta llegar a una respuesta final.
+
+Este ejemplo define dos herramientas sencillas:
+- calculadora: hace operaciones matemáticas.
+- clima_falso: simula una consulta de clima (podrías reemplazarla por una API real).
+
+Requisitos:
+    pip install anthropic
+
+Necesitas una API key de Anthropic en la variable de entorno ANTHROPIC_API_KEY.
+"""
+
+import os
+import json
+from anthropic import Anthropic
+
+client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
+MODEL = "claude-sonnet-4-6"  # puedes cambiarlo por el modelo que prefieras
+
+
+# ---------------------------------------------------------------------------
+# 1. Definimos las herramientas que el agente puede usar
+# ---------------------------------------------------------------------------
+
+def calculadora(expresion: str) -> str:
+    """Evalúa una expresión matemática simple de forma segura."""
+    try:
+        # eval restringido: solo permitimos operadores matemáticos básicos
+        resultado = eval(expresion, {"__builtins__": {}}, {})
+        return str(resultado)
+    except Exception as e:
+        return f"Error al calcular: {e}"
+
+
+def clima_falso(ciudad: str) -> str:
+    """Simula la consulta del clima de una ciudad (datos inventados)."""
+    datos = {
+        "madrid": "22°C, soleado",
+        "buenos aires": "18°C, nublado",
+        "ciudad de mexico": "20°C, lluvia ligera",
+    }
+    return datos.get(ciudad.lower(), "No tengo datos para esa ciudad.")
+
+
+# Mapa para poder llamar a las funciones por nombre
+FUNCIONES_DISPONIBLES = {
+    "calculadora": calculadora,
+    "clima_falso": clima_falso,
+}
+
+# Definición de las tools en el formato que espera la API de Claude
+TOOLS = [
+    {
+        "name": "calculadora",
+        "description": "Evalúa una expresión matemática y devuelve el resultado.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expresion": {
+                    "type": "string",
+                    "description": "Expresión matemática, ej: '23 * 4 + 1'",
+                }
+            },
+            "required": ["expresion"],
+        },
+    },
+    {
+        "name": "clima_falso",
+        "description": "Devuelve el clima simulado de una ciudad.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ciudad": {
+                    "type": "string",
+                    "description": "Nombre de la ciudad, ej: 'Madrid'",
+                }
+            },
+            "required": ["ciudad"],
+        },
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# 2. Bucle del agente (agent loop)
+# ---------------------------------------------------------------------------
+
+def ejecutar_agente(tarea_usuario: str, max_iteraciones: int = 5):
+    mensajes = [{"role": "user", "content": tarea_usuario}]
+
+    for _ in range(max_iteraciones):
+        respuesta = client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            tools=TOOLS,
+            messages=mensajes,
+        )
+
+        # Guardamos la respuesta del modelo en el historial
+        mensajes.append({"role": "assistant", "content": respuesta.content})
+
+        # Si el modelo no pidió usar ninguna herramienta, terminamos
+        if respuesta.stop_reason != "tool_use":
+            texto_final = "".join(
+                bloque.text for bloque in respuesta.content if bloque.type == "text"
+            )
+            return texto_final
+
+        # El modelo pidió usar una o más herramientas: las ejecutamos
+        resultados_tools = []
+        for bloque in respuesta.content:
+            if bloque.type == "tool_use":
+                nombre_funcion = bloque.name
+                argumentos = bloque.input
+                print(f"🔧 El agente decidió usar: {nombre_funcion}({argumentos})")
+
+                funcion = FUNCIONES_DISPONIBLES[nombre_funcion]
+                resultado = funcion(**argumentos)
+
+                resultados_tools.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": bloque.id,
+                        "content": str(resultado),
+                    }
+                )
+
+        # Enviamos los resultados de vuelta al modelo para que continúe
+        mensajes.append({"role": "user", "content": resultados_tools})
+
+    return "El agente alcanzó el máximo de iteraciones sin terminar."
+
+
+# ---------------------------------------------------------------------------
+# 3. Ejemplo de uso
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    pregunta = "¿Cuánto es 45 * 12? Además, dime el clima en Madrid."
+    respuesta_final = ejecutar_agente(pregunta)
+    print("\n--- Respuesta final del agente ---")
+    print(respuesta_final)
